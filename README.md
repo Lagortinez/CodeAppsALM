@@ -29,6 +29,15 @@ flowchart LR
 - Service user with permissions to deploy code apps and import solutions in the target environments.
 - Code app folder containing `package.json` and `power.config.json`.
 
+## Environments
+
+| Name | Role | Environment ID | URL | Unique Name |
+|---|---|---|---|---|
+| DevCodeApps | DEV / source | `18b01124-91b5-e62d-8d61-58d148706748` | https://devcodeappsbizzsummit.crm4.dynamics.com/ | `unq7321f18560bdf111be85000d3adc9` |
+| ProdCodeApps | PROD / target | `11fc40eb-f807-e696-965e-acfa33274852` | https://prodcodeappsbizzsummit.crm4.dynamics.com/ | `unq96b26d329bbdf111be85000d3adc9` |
+
+List them locally with `pac auth create` followed by `pac env list`.
+
 ## Azure DevOps Pipeline Variables
 
 ### DEV Pipeline ([pipeline-dev.yml](pipeline-dev.yml))
@@ -51,7 +60,7 @@ NODE_VERSION=22.x
 PAC_CLI_VERSION=2.8.1
 SERVICE_USERNAME=service@powerplatform.top
 TENANT_ID=<tenant-id>
-ENVIRONMENT_URL=https://<org>.crm4.dynamics.com
+ENVIRONMENT_URL=https://devcodeappsbizzsummit.crm4.dynamics.com
 SERVICE_PASSWORD=********
 ```
 
@@ -79,11 +88,11 @@ Example values:
 
 ```text
 SOLUTION_UNIQUE_NAME=<solution-unique-name>
-SOURCE_ENVIRONMENT_URL=https://<source-org>.crm4.dynamics.com
+SOURCE_ENVIRONMENT_URL=https://devcodeappsbizzsummit.crm4.dynamics.com
 SOURCE_USERNAME=service@powerplatform.top
 SOURCE_TENANT_ID=<tenant-id>
 SOURCE_PASSWORD=********
-PROD_ENVIRONMENT_URL=https://<prod-org>.crm4.dynamics.com
+PROD_ENVIRONMENT_URL=https://prodcodeappsbizzsummit.crm4.dynamics.com
 PROD_USERNAME=service-prod@powerplatform.top
 PROD_PASSWORD=********
 TARGET_TENANT_ID=<tenant-id>
