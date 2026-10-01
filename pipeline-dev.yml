@@ -1,0 +1,185 @@
+trigger:
+  branches:
+    include:
+      - master
+  paths:
+    include:
+      - CodeApp_NeonReactor/src/**
+      - CodeApp_NeonReactor/public/**
+      - CodeApp_NeonReactor/index.html
+      - CodeApp_NeonReactor/power.config.json
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+  - stage: Build
+    displayName: Build App
+    jobs:
+      - job: Build
+        displayName: Build React App
+        steps:
+          - task: UseNode@1
+            inputs:
+              version: '$(NODE_VERSION)'
+            displayName: 'Install Node.js'
+
+          - script: |
+              npm ci
+            displayName: 'Install dependencies'
+            workingDirectory: '$(CODEAPP_DIR)'
+
+          - script: |
+              npm run build
+            displayName: 'Build application'
+            workingDirectory: '$(CODEAPP_DIR)'
+
+  - stage: Deploy
+    displayName: Deploy to Power Platform
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - job: Deploy
+        displayName: Deploy Code App
+        steps:
+          - checkout: self
+            persistCredentials: true
+
+          - task: UseNode@1
+            inputs:
+              version: '$(NODE_VERSION)'
+            displayName: 'Install Node.js'
+
+          - script: |
+              npm ci
+            displayName: 'Install dependencies'
+            workingDirectory: '$(CODEAPP_DIR)'
+
+          - script: |
+              npm run build
+            displayName: 'Build application'
+            workingDirectory: '$(CODEAPP_DIR)'
+
+          - script: |
+              set -euo pipefail
+
+              dotnet tool install --global Microsoft.PowerApps.CLI.Tool --version "$(PAC_CLI_VERSION)"
+              export PATH="$PATH:$HOME/.dotnet/tools"
+
+              if [ -z "$(ENVIRONMENT_URL)" ]; then
+                echo "ENVIRONMENT_URL is empty. Set it to your Dataverse org URL (example: https://orgname.crm.dynamics.com)."
+                exit 1
+              fi
+
+              if [ -z "$(SERVICE_USERNAME)" ]; then
+                echo "SERVICE_USERNAME is empty. Set it in Azure DevOps Pipeline settings."
+                exit 1
+              fi
+
+              if [ -z "$(SERVICE_PASSWORD)" ]; then
+                echo "SERVICE_PASSWORD is empty. Set it as a secret variable in Azure DevOps Pipeline settings."
+                exit 1
+              fi
+
+              if [ -z "$(PAC_CLI_VERSION)" ]; then
+                echo "PAC_CLI_VERSION is empty. Set it as a pipeline variable in Azure DevOps."
+                exit 1
+              fi
+
+              if [ ! -d "./dist" ]; then
+                echo "Build output ./dist not found. Ensure the deploy job runs npm run build or downloads build artifacts."
+                exit 1
+              fi
+
+              pac auth clear
+              pac auth create --name "CI" --username "$(SERVICE_USERNAME)" --password "$(SERVICE_PASSWORD)" --tenant "$(TENANT_ID)"
+              pac org select --environment "$(ENVIRONMENT_URL)"
+
+              PAC_ACCESS_LOG="$(mktemp)"
+              pac code list 2>&1 | tee "$PAC_ACCESS_LOG"
+              if grep -Eiq "HTTP error status:\s*403|does not have permission to access the path|Forbidden" "$PAC_ACCESS_LOG"; then
+                echo "PAC access check failed for this service user in target environment."
+                exit 1
+              fi
+
+              CURRENT_APP_ID="$(node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync('power.config.json','utf8'));console.log(c.appId ?? '')")"
+              CURRENT_APP_NAME="$(node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync('power.config.json','utf8'));console.log(c.appDisplayName)")"
+
+              if [ -z "$CURRENT_APP_ID" ] || [ "$CURRENT_APP_ID" = "null" ]; then
+                EXISTING_APP_ID="$(awk -v app="$CURRENT_APP_NAME" 'index($0, app)>0 && $1 ~ /^[0-9a-fA-F-]{36}$/ {print $1; exit}' "$PAC_ACCESS_LOG")"
+                if [ -n "$EXISTING_APP_ID" ]; then
+                  echo "Resolved existing appId '$EXISTING_APP_ID' from app display name '$CURRENT_APP_NAME'."
+                  node -e "const fs=require('fs');const p='power.config.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.appId='$EXISTING_APP_ID';fs.writeFileSync(p, JSON.stringify(c,null,2)+'\\n');"
+                  CURRENT_APP_ID="$EXISTING_APP_ID"
+                else
+                  echo "No existing app found for '$CURRENT_APP_NAME'. pac code push will create one."
+                fi
+              fi
+
+              max_attempts=3
+              attempt=1
+              push_succeeded=0
+              app_not_found_recovery_done=0
+
+              while [ "$attempt" -le "$max_attempts" ]; do
+                echo "PAC push attempt $attempt/$max_attempts"
+                PAC_PUSH_LOG="$(mktemp)"
+                pac code push 2>&1 | tee "$PAC_PUSH_LOG"
+
+                if grep -Eiq "HTTP error status:\s*403|does not have permission to access the path|Forbidden" "$PAC_PUSH_LOG"; then
+                  echo "PAC deployment failed due to insufficient service user permissions in the target environment."
+                  exit 1
+                fi
+
+                if grep -Eiq "ApplicationNotFound" "$PAC_PUSH_LOG"; then
+                  if [ "$app_not_found_recovery_done" -eq 0 ] && [ -n "$CURRENT_APP_ID" ] && [ "$CURRENT_APP_ID" != "null" ]; then
+                    echo "Configured appId '$CURRENT_APP_ID' was not found. Clearing appId and retrying once as app creation flow."
+                    node -e "const fs=require('fs');const p='power.config.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.appId=null;fs.writeFileSync(p, JSON.stringify(c,null,2)+'\\n');"
+                    CURRENT_APP_ID=""
+                    app_not_found_recovery_done=1
+                    attempt=$((attempt + 1))
+                    continue
+                  fi
+                fi
+
+                if grep -Eiq "HTTP error status:\s*5[0-9]{2}|InternalServerError" "$PAC_PUSH_LOG"; then
+                  if [ "$attempt" -lt "$max_attempts" ]; then
+                    echo "PAC deployment hit a transient server error (5xx). Retrying in 15 seconds..."
+                    attempt=$((attempt + 1))
+                    sleep 15
+                    continue
+                  fi
+                fi
+
+                if grep -Eiq "HTTP error status:" "$PAC_PUSH_LOG"; then
+                  echo "PAC deployment failed. See HTTP error details in the logs above."
+                  exit 1
+                fi
+
+                push_succeeded=1
+                break
+              done
+
+              if [ "$push_succeeded" -ne 1 ]; then
+                echo "PAC deployment did not succeed after $max_attempts attempts."
+                exit 1
+              fi
+
+              PUSH_APP_ID="$(sed -nE 's#.*app/([0-9a-fA-F-]{36}).*#\1#p' "$PAC_PUSH_LOG" | head -n1)"
+              if [ -n "$PUSH_APP_ID" ] && ([ -z "$CURRENT_APP_ID" ] || [ "$CURRENT_APP_ID" = "null" ]); then
+                echo "Persisting newly created appId '$PUSH_APP_ID' into power.config.json."
+                node -e "const fs=require('fs');const p='power.config.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.appId='$PUSH_APP_ID';fs.writeFileSync(p, JSON.stringify(c,null,2)+'\\n');"
+              fi
+
+              if ! git diff --quiet -- power.config.json; then
+                echo "Committing updated power.config.json back to repository."
+                git config user.email "azure-pipelines-bot@local"
+                git config user.name "azure-pipelines-bot"
+                git add power.config.json
+                git commit -m "ci: persist CodeApp appId [skip ci]"
+                git push origin HEAD:master
+              else
+                echo "No appId changes to persist."
+              fi
+            displayName: 'Authenticate and Deploy to Power Platform'
+            workingDirectory: '$(CODEAPP_DIR)'

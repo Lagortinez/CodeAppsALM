@@ -1,0 +1,178 @@
+trigger: none
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  PAC_CLI_VERSION: '2.8.1'
+
+stages:
+  - stage: BranchGuard
+    displayName: Validate Source Branch
+    jobs:
+      - job: Validatemain
+        displayName: Ensure run is from main
+        steps:
+          - script: |
+              set -euo pipefail
+              echo "Build.SourceBranch=$(Build.SourceBranch)"
+              if [ "$(Build.SourceBranch)" != "refs/heads/main" ]; then
+                echo "This pipeline can only run from refs/heads/main."
+                exit 1
+              fi
+            displayName: 'Fail if branch is not main'
+
+  - stage: ExportSolution
+    displayName: Export Solution from Source
+    dependsOn: BranchGuard
+    condition: succeeded()
+    jobs:
+      - job: Export
+        displayName: Export Managed Solution
+        steps:
+          - task: UseNode@1
+            inputs:
+              version: '22.x'
+            displayName: 'Install Node.js'
+
+          - script: |
+              set -euo pipefail
+
+              dotnet tool install --global Microsoft.PowerApps.CLI.Tool --version "$(PAC_CLI_VERSION)"
+              export PATH="$PATH:$HOME/.dotnet/tools"
+
+              if [ -z "$(SOLUTION_UNIQUE_NAME)" ]; then
+                echo "SOLUTION_UNIQUE_NAME is empty."
+                exit 1
+              fi
+
+              if [ -z "$(SOURCE_ENVIRONMENT_URL)" ]; then
+                echo "SOURCE_ENVIRONMENT_URL is empty."
+                exit 1
+              fi
+
+              if [ -z "$(SOURCE_USERNAME)" ]; then
+                echo "SOURCE_USERNAME is empty."
+                exit 1
+              fi
+
+              if [ -z "$(SOURCE_PASSWORD)" ]; then
+                echo "SOURCE_PASSWORD is empty."
+                exit 1
+              fi
+
+              if [ -z "$(SOURCE_TENANT_ID)" ]; then
+                echo "SOURCE_TENANT_ID is empty."
+                exit 1
+              fi
+
+              pac auth clear
+              pac auth create --name "Source" --username "$(SOURCE_USERNAME)" --password "$(SOURCE_PASSWORD)" --tenant "$(SOURCE_TENANT_ID)"
+              pac org select --environment "$(SOURCE_ENVIRONMENT_URL)"
+
+              mkdir -p "$(Build.ArtifactStagingDirectory)/solution"
+              EXPORT_PATH="$(Build.ArtifactStagingDirectory)/solution/$(SOLUTION_UNIQUE_NAME)_managed.zip"
+
+              pac solution export \
+                --name "$(SOLUTION_UNIQUE_NAME)" \
+                --path "$EXPORT_PATH" \
+                --managed \
+                --overwrite
+
+              echo "Exported managed solution to: $EXPORT_PATH"
+            displayName: 'Export managed solution from source'
+
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/solution'
+              artifact: 'solution-package'
+              publishLocation: 'pipeline'
+            displayName: 'Publish exported solution artifact'
+
+  - stage: Approval
+    displayName: Approval Before PROD Import
+    dependsOn: ExportSolution
+    condition: succeeded()
+    jobs:
+      - job: WaitForApproval
+        displayName: Manual Approval
+        pool: server
+        timeoutInMinutes: 4320
+        steps:
+          - task: ManualValidation@0
+            timeoutInMinutes: 1440
+            inputs:
+              notifyUsers: ''
+              instructions: |
+                Approve to import solution $(SOLUTION_UNIQUE_NAME) into PROD.
+                Run context:
+                - Source ref: $(Build.SourceBranch)
+                - Source ref name: $(Build.SourceBranchName)
+                - Commit: $(Build.SourceVersion)
+                - Run number: $(Build.BuildNumber)
+                Validate change ticket, release notes, and deployment window before approving.
+              onTimeout: reject
+
+  - stage: ImportProd
+    displayName: Import Solution into PROD
+    dependsOn: Approval
+    condition: succeeded()
+    jobs:
+      - job: Import
+        displayName: Import Managed Solution to PROD
+        steps:
+          - task: UseNode@1
+            inputs:
+              version: '22.x'
+            displayName: 'Install Node.js'
+
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: 'solution-package'
+              path: '$(Pipeline.Workspace)/solution-package'
+            displayName: 'Download exported solution artifact'
+
+          - script: |
+              set -euo pipefail
+
+              dotnet tool install --global Microsoft.PowerApps.CLI.Tool --version "$(PAC_CLI_VERSION)"
+              export PATH="$PATH:$HOME/.dotnet/tools"
+
+              IMPORT_PATH="$(Pipeline.Workspace)/solution-package/$(SOLUTION_UNIQUE_NAME)_managed.zip"
+              if [ ! -f "$IMPORT_PATH" ]; then
+                echo "Managed solution package not found at: $IMPORT_PATH"
+                exit 1
+              fi
+
+              if [ -z "$(PROD_ENVIRONMENT_URL)" ]; then
+                echo "PROD_ENVIRONMENT_URL is empty."
+                exit 1
+              fi
+
+              if [ -z "$(PROD_USERNAME)" ]; then
+                echo "PROD_USERNAME is empty."
+                exit 1
+              fi
+
+              if [ -z "$(PROD_PASSWORD)" ]; then
+                echo "PROD_PASSWORD is empty."
+                exit 1
+              fi
+
+              TARGET_TENANT_ID_VALUE="$(TARGET_TENANT_ID)"
+              if [ -z "$TARGET_TENANT_ID_VALUE" ]; then
+                TARGET_TENANT_ID_VALUE="$(PROD_TENANT_ID)"
+              fi
+              if [ -z "$TARGET_TENANT_ID_VALUE" ]; then
+                echo "TARGET_TENANT_ID is empty. Set TARGET_TENANT_ID (preferred) or PROD_TENANT_ID."
+                exit 1
+              fi
+
+              pac auth clear
+              pac auth create --name "Prod" --username "$(PROD_USERNAME)" --password "$(PROD_PASSWORD)" --tenant "$TARGET_TENANT_ID_VALUE"
+              pac org select --environment "$(PROD_ENVIRONMENT_URL)"
+
+              pac solution import --path "$IMPORT_PATH" --publish-changes
+              echo "Imported solution $(SOLUTION_UNIQUE_NAME) into PROD."
+            displayName: 'Import managed solution into PROD'
