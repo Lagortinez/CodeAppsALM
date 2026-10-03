@@ -20,8 +20,41 @@ permissions:
   contents: write # needed to commit the appId back to the repo
 
 jobs:
+  quality-gate:
+    name: Secrets, SAST and lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: TruffleHog secret scan
+        run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/trufflesecurity/trufflehog:latest \
+            filesystem /repo --results=verified,unknown --fail --no-update
+
+      - name: Semgrep SAST
+        run: |
+          python3 -m pip install --quiet semgrep
+          semgrep scan --config p/default --error --metrics=off CodeApp_SpaceInvaders/src
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ vars.NODE_VERSION || '22.x' }}
+          cache: npm
+          cache-dependency-path: CodeApp_SpaceInvaders/package-lock.json
+
+      - name: Install dependencies
+        working-directory: CodeApp_SpaceInvaders
+        run: npm ci
+
+      - name: ESLint
+        working-directory: CodeApp_SpaceInvaders
+        run: npm run lint
+
   build-and-deploy:
     name: Build and deploy to DEV
+    needs: quality-gate
     runs-on: ubuntu-latest
     environment: dev
     env:
