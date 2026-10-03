@@ -88,11 +88,24 @@ jobs:
           pac org select --environment "$ENVIRONMENT_URL"
 
           mkdir -p solution
-          pac solution export \
-            --name "$SOLUTION_NAME" \
-            --path "solution/${SOLUTION_NAME}_managed.zip" \
-            --managed \
-            --overwrite
+          # Async export plus retries: the sync export hit a transient generic SQL error (-2147204784).
+          for attempt in 1 2 3; do
+            echo "Export attempt $attempt/3"
+            if pac solution export \
+              --name "$SOLUTION_NAME" \
+              --path "solution/${SOLUTION_NAME}_managed.zip" \
+              --managed \
+              --async \
+              --max-async-wait-time 20 \
+              --overwrite; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Solution export failed after 3 attempts."
+              exit 1
+            fi
+            sleep 20
+          done
 
       - uses: actions/upload-artifact@v6
         with:
