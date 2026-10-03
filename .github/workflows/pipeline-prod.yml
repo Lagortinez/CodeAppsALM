@@ -170,7 +170,7 @@ jobs:
     # Manual approval: configure Required reviewers on the 'prod' environment.
     environment: prod
     env:
-      PAC_CLI_VERSION: ${{ vars.PAC_CLI_VERSION }}
+      PAC_CLI_VERSION: ${{ vars.PAC_CLI_VERSION || '2.8.1' }}
       PROD_TENANT_ID: ${{ vars.PROD_TENANT_ID }}
       PROD_ENVIRONMENT_URL: ${{ vars.PROD_ENVIRONMENT_URL }}
       PROD_USERNAME: ${{ vars.PROD_USERNAME }}
