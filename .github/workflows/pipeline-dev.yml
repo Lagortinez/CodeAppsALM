@@ -20,7 +20,6 @@ permissions:
   contents: write # needed to commit the appId back to the repo
 
 env:
-  CODEAPP_DIR: ${{ vars.CODEAPP_DIR }}
   NODE_VERSION: ${{ vars.NODE_VERSION }}
   PAC_CLI_VERSION: ${{ vars.PAC_CLI_VERSION }}
   TENANT_ID: ${{ vars.TENANT_ID }}
@@ -36,7 +35,7 @@ jobs:
     environment: dev
     defaults:
       run:
-        working-directory: ${{ vars.CODEAPP_DIR }}
+        working-directory: CodeApp_SpaceInvaders
     steps:
       - uses: actions/checkout@v4
 
@@ -44,7 +43,7 @@ jobs:
         with:
           node-version: ${{ vars.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: ${{ vars.CODEAPP_DIR }}/package-lock.json
+          cache-dependency-path: CodeApp_SpaceInvaders/package-lock.json
 
       - name: Install dependencies
         run: npm ci
