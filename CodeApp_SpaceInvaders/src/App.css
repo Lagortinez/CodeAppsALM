@@ -11,7 +11,7 @@
 .si-root h1 {
   margin: 0;
   letter-spacing: 6px;
-  color: #7cfc00;
+  color: #ff2d2d;
   font-size: 1.8rem;
 }
 
@@ -28,7 +28,7 @@
 
 .si-stage canvas {
   max-width: 100%;
-  border: 2px solid #7cfc00;
+  border: 2px solid #ff2d2d;
   border-radius: 6px;
 }
 
@@ -58,7 +58,7 @@
   padding: 8px 20px;
   font: inherit;
   color: #0b0b1a;
-  background: #7cfc00;
+  background: #ff2d2d;
   border: none;
   border-radius: 4px;
   cursor: pointer;

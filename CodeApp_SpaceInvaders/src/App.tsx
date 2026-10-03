@@ -178,7 +178,7 @@ function App() {
       ctx.fillRect(0, 0, W, H)
       g.invaders.forEach((i) => i.alive && drawInvader(i))
 
-      ctx.fillStyle = '#7CFC00'
+      ctx.fillStyle = '#ff2d2d'
       ctx.fillRect(g.playerX - 18, PLAYER_Y, 36, 12)
       ctx.fillRect(g.playerX - 3, PLAYER_Y - 10, 6, 10)
 
