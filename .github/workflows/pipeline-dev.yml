@@ -22,11 +22,11 @@ permissions:
 jobs:
   quality-gate:
     name: Secrets, SAST and lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: TruffleHog secret scan
         run: |
@@ -38,7 +38,7 @@ jobs:
           python3 -m pip install --quiet semgrep
           semgrep scan --config p/default --error --metrics=off CodeApp_SpaceInvaders/src
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ vars.NODE_VERSION || '22.x' }}
           cache: npm
@@ -55,7 +55,7 @@ jobs:
   build-and-deploy:
     name: Build and deploy to DEV
     needs: quality-gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: dev
     env:
       NODE_VERSION: ${{ vars.NODE_VERSION }}
@@ -69,9 +69,9 @@ jobs:
       run:
         working-directory: CodeApp_SpaceInvaders
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ vars.NODE_VERSION }}
           cache: npm
