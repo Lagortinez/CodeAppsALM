@@ -1,0 +1,12 @@
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #05050f;
+}
+
+#root {
+  padding: 16px;
+}

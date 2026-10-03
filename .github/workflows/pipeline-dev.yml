@@ -1,0 +1,166 @@
+name: Deploy DEV
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - CodeApp_SpaceInvaders/src/**
+      - CodeApp_SpaceInvaders/public/**
+      - CodeApp_SpaceInvaders/index.html
+      - CodeApp_SpaceInvaders/power.config.json
+      - .github/workflows/pipeline-dev.yml
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: write # needed to commit the appId back to the repo
+
+env:
+  CODEAPP_DIR: ${{ vars.CODEAPP_DIR }}
+  NODE_VERSION: ${{ vars.NODE_VERSION }}
+  PAC_CLI_VERSION: ${{ vars.PAC_CLI_VERSION }}
+  TENANT_ID: ${{ vars.TENANT_ID }}
+  ENVIRONMENT_URL: ${{ vars.ENVIRONMENT_URL }}
+  SOLUTION_NAME: ${{ vars.SOLUTION_NAME }}
+  SERVICE_USERNAME: ${{ vars.SERVICE_USERNAME }}
+  SERVICE_PASSWORD: ${{ secrets.SERVICE_PASSWORD }}
+
+jobs:
+  build-and-deploy:
+    name: Build and deploy to DEV
+    runs-on: ubuntu-latest
+    environment: dev
+    defaults:
+      run:
+        working-directory: ${{ vars.CODEAPP_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ vars.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ vars.CODEAPP_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        run: npm run build
+
+      - name: Install Power Platform CLI
+        run: |
+          dotnet tool install --global Microsoft.PowerApps.CLI.Tool --version "$PAC_CLI_VERSION"
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Authenticate and deploy to Power Platform
+        run: |
+          set -euo pipefail
+
+          for v in ENVIRONMENT_URL SERVICE_USERNAME SERVICE_PASSWORD TENANT_ID PAC_CLI_VERSION; do
+            if [ -z "${!v}" ]; then
+              echo "::error::$v is empty. Define it in the repository settings (Variables / Secrets)."
+              exit 1
+            fi
+          done
+
+          if [ ! -d "./dist" ]; then
+            echo "::error::Build output ./dist not found."
+            exit 1
+          fi
+
+          pac auth clear
+          pac auth create --name "CI" --username "$SERVICE_USERNAME" --password "$SERVICE_PASSWORD" --tenant "$TENANT_ID"
+          pac org select --environment "$ENVIRONMENT_URL"
+
+          PAC_ACCESS_LOG="$(mktemp)"
+          pac code list 2>&1 | tee "$PAC_ACCESS_LOG"
+          if grep -Eiq "HTTP error status:\s*403|does not have permission to access the path|Forbidden" "$PAC_ACCESS_LOG"; then
+            echo "::error::PAC access check failed for this service user in the target environment."
+            exit 1
+          fi
+
+          set_app_id() {
+            node -e "const fs=require('fs');const p='power.config.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.appId=process.argv[1]==='null'?null:process.argv[1];fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');" "$1"
+          }
+
+          CURRENT_APP_ID="$(node -e "const c=JSON.parse(require('fs').readFileSync('power.config.json','utf8'));console.log(c.appId ?? '')")"
+          CURRENT_APP_NAME="$(node -e "const c=JSON.parse(require('fs').readFileSync('power.config.json','utf8'));console.log(c.appDisplayName)")"
+
+          if [ -z "$CURRENT_APP_ID" ] || [ "$CURRENT_APP_ID" = "null" ]; then
+            EXISTING_APP_ID="$(awk -v app="$CURRENT_APP_NAME" 'index($0, app)>0 && $1 ~ /^[0-9a-fA-F-]{36}$/ {print $1; exit}' "$PAC_ACCESS_LOG")"
+            if [ -n "$EXISTING_APP_ID" ]; then
+              echo "Resolved existing appId '$EXISTING_APP_ID' from display name '$CURRENT_APP_NAME'."
+              set_app_id "$EXISTING_APP_ID"
+              CURRENT_APP_ID="$EXISTING_APP_ID"
+            else
+              echo "No existing app found for '$CURRENT_APP_NAME'. pac code push will create one."
+            fi
+          fi
+
+          max_attempts=3
+          attempt=1
+          push_succeeded=0
+          app_not_found_recovery_done=0
+
+          while [ "$attempt" -le "$max_attempts" ]; do
+            echo "PAC push attempt $attempt/$max_attempts"
+            PAC_PUSH_LOG="$(mktemp)"
+            pac code push --solutionName "${SOLUTION_NAME:-Vibing}" 2>&1 | tee "$PAC_PUSH_LOG" || true
+
+            if grep -Eiq "HTTP error status:\s*403|does not have permission to access the path|Forbidden" "$PAC_PUSH_LOG"; then
+              echo "::error::PAC deployment failed: insufficient service user permissions in the target environment."
+              exit 1
+            fi
+
+            if grep -Eiq "ApplicationNotFound" "$PAC_PUSH_LOG" \
+              && [ "$app_not_found_recovery_done" -eq 0 ] \
+              && [ -n "$CURRENT_APP_ID" ] && [ "$CURRENT_APP_ID" != "null" ]; then
+              echo "Configured appId '$CURRENT_APP_ID' not found. Clearing it and retrying as app creation."
+              set_app_id null
+              CURRENT_APP_ID=""
+              app_not_found_recovery_done=1
+              attempt=$((attempt + 1))
+              continue
+            fi
+
+            if grep -Eiq "HTTP error status:\s*5[0-9]{2}|InternalServerError" "$PAC_PUSH_LOG" && [ "$attempt" -lt "$max_attempts" ]; then
+              echo "Transient server error (5xx). Retrying in 15 seconds..."
+              attempt=$((attempt + 1))
+              sleep 15
+              continue
+            fi
+
+            if grep -Eiq "HTTP error status:" "$PAC_PUSH_LOG"; then
+              echo "::error::PAC deployment failed. See HTTP error details above."
+              exit 1
+            fi
+
+            push_succeeded=1
+            break
+          done
+
+          if [ "$push_succeeded" -ne 1 ]; then
+            echo "::error::PAC deployment did not succeed after $max_attempts attempts."
+            exit 1
+          fi
+
+          PUSH_APP_ID="$(sed -nE 's#.*app/([0-9a-fA-F-]{36}).*#\1#p' "$PAC_PUSH_LOG" | head -n1)"
+          if [ -n "$PUSH_APP_ID" ] && { [ -z "$CURRENT_APP_ID" ] || [ "$CURRENT_APP_ID" = "null" ]; }; then
+            echo "Persisting newly created appId '$PUSH_APP_ID'."
+            set_app_id "$PUSH_APP_ID"
+          fi
+
+          if ! git diff --quiet -- power.config.json; then
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git config user.name "github-actions[bot]"
+            git add power.config.json
+            git commit -m "ci: persist CodeApp appId [skip ci]"
+            git push origin HEAD:main
+          else
+            echo "No appId changes to persist."
+          fi

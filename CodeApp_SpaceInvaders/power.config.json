@@ -1,0 +1,14 @@
+{
+  "version": "1.0",
+  "appId": "5c292406-339d-4246-ac09-a7821e6338a1",
+  "appDisplayName": "Space Invaders",
+  "region": "prod",
+  "environmentId": "ef3c3c6e-c5fa-e169-8294-ffda42cb9101",
+  "description": " ",
+  "buildPath": "./dist",
+  "buildEntryPoint": "index.html",
+  "localAppUrl": "http://localhost:3000",
+  "logoPath": "Default",
+  "connectionReferences": {},
+  "databaseReferences": {}
+}
