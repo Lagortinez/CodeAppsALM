@@ -1,0 +1,148 @@
+name: Deploy PROD
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  branch-guard:
+    name: Ensure run is from main
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fail if branch is not main
+        run: |
+          echo "GITHUB_REF=$GITHUB_REF"
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::This workflow can only run from refs/heads/main."
+            exit 1
+          fi
+
+  quality-gate:
+    name: Secrets, SAST and lint
+    needs: branch-guard
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: TruffleHog secret scan
+        run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/trufflesecurity/trufflehog:latest \
+            filesystem /repo --results=verified,unknown --fail --no-update
+
+      - name: Semgrep SAST
+        run: |
+          python3 -m pip install --quiet semgrep
+          semgrep scan --config p/default --error --metrics=off CodeApp_SpaceInvaders/src
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ vars.NODE_VERSION || '22.x' }}
+          cache: npm
+          cache-dependency-path: CodeApp_SpaceInvaders/package-lock.json
+
+      - name: Install dependencies
+        working-directory: CodeApp_SpaceInvaders
+        run: npm ci
+
+      - name: ESLint
+        working-directory: CodeApp_SpaceInvaders
+        run: npm run lint
+
+  export-solution:
+    name: Export managed solution from DEV
+    needs: quality-gate
+    runs-on: ubuntu-24.04
+    environment: dev
+    env:
+      PAC_CLI_VERSION: ${{ vars.PAC_CLI_VERSION }}
+      TENANT_ID: ${{ vars.TENANT_ID }}
+      ENVIRONMENT_URL: ${{ vars.ENVIRONMENT_URL }}
+      SOLUTION_NAME: ${{ vars.SOLUTION_NAME }}
+      SERVICE_USERNAME: ${{ vars.SERVICE_USERNAME }}
+      SERVICE_PASSWORD: ${{ secrets.SERVICE_PASSWORD }}
+    steps:
+      - name: Install Power Platform CLI
+        run: |
+          dotnet tool install --global Microsoft.PowerApps.CLI.Tool --version "$PAC_CLI_VERSION"
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Export managed solution
+        run: |
+          set -euo pipefail
+
+          for v in SOLUTION_NAME ENVIRONMENT_URL SERVICE_USERNAME SERVICE_PASSWORD TENANT_ID PAC_CLI_VERSION; do
+            if [ -z "${!v}" ]; then
+              echo "::error::$v is empty. Define it in the 'dev' environment (Variables / Secrets)."
+              exit 1
+            fi
+          done
+
+          pac auth clear
+          pac auth create --name "Source" --username "$SERVICE_USERNAME" --password "$SERVICE_PASSWORD" --tenant "$TENANT_ID"
+          pac org select --environment "$ENVIRONMENT_URL"
+
+          mkdir -p solution
+          pac solution export \
+            --name "$SOLUTION_NAME" \
+            --path "solution/${SOLUTION_NAME}_managed.zip" \
+            --managed \
+            --overwrite
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: solution-package
+          path: solution/*.zip
+          if-no-files-found: error
+
+  import-prod:
+    name: Import solution into PROD
+    needs: export-solution
+    runs-on: ubuntu-24.04
+    # Manual approval: configure Required reviewers on the 'prod' environment.
+    environment: prod
+    env:
+      PAC_CLI_VERSION: ${{ vars.PAC_CLI_VERSION }}
+      PROD_TENANT_ID: ${{ vars.PROD_TENANT_ID }}
+      PROD_ENVIRONMENT_URL: ${{ vars.PROD_ENVIRONMENT_URL }}
+      PROD_USERNAME: ${{ vars.PROD_USERNAME }}
+      PROD_PASSWORD: ${{ secrets.PROD_PASSWORD }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: solution-package
+          path: solution
+
+      - name: Install Power Platform CLI
+        run: |
+          dotnet tool install --global Microsoft.PowerApps.CLI.Tool --version "$PAC_CLI_VERSION"
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Import managed solution into PROD
+        run: |
+          set -euo pipefail
+
+          for v in PROD_ENVIRONMENT_URL PROD_USERNAME PROD_PASSWORD PROD_TENANT_ID PAC_CLI_VERSION; do
+            if [ -z "${!v}" ]; then
+              echo "::error::$v is empty. Define it in the 'prod' environment (Variables / Secrets)."
+              exit 1
+            fi
+          done
+
+          shopt -s nullglob
+          packages=(solution/*_managed.zip)
+          if [ "${#packages[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one managed solution package, found ${#packages[@]}."
+            exit 1
+          fi
+
+          pac auth clear
+          pac auth create --name "Prod" --username "$PROD_USERNAME" --password "$PROD_PASSWORD" --tenant "$PROD_TENANT_ID"
+          pac org select --environment "$PROD_ENVIRONMENT_URL"
+
+          pac solution import --path "${packages[0]}" --publish-changes
