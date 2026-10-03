@@ -100,9 +100,59 @@ jobs:
           path: solution/*.zip
           if-no-files-found: error
 
+  scan-solution:
+    name: Scan exported solution
+    needs: export-solution
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: solution-package
+          path: solution
+
+      - name: Unzip solution
+        run: |
+          set -euo pipefail
+          mkdir unpacked
+          unzip -q solution/*_managed.zip -d unpacked
+          find unpacked -type f | head -50
+
+      - name: TruffleHog secret scan
+        run: |
+          docker run --rm -v "$PWD/unpacked:/scan" ghcr.io/trufflesecurity/trufflehog:latest \
+            filesystem /scan --results=verified,unknown --fail --no-update
+
+      - name: Semgrep SAST
+        run: |
+          python3 -m pip install --quiet semgrep
+          semgrep scan --config p/default --error --metrics=off unpacked
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ vars.NODE_VERSION || '22.x' }}
+
+      - name: ESLint (security rules on bundled JS)
+        run: |
+          # Recommended rules fail on minified third-party code, so only security rules are enforced.
+          cat > unpacked/eslint.config.mjs <<'EOF'
+          export default [
+            {
+              files: ['**/*.js'],
+              languageOptions: { ecmaVersion: 2022, sourceType: 'module' },
+              rules: {
+                'no-eval': 'error',
+                'no-implied-eval': 'error',
+                'no-new-func': 'error',
+              },
+            },
+          ]
+          EOF
+          cd unpacked
+          npx --yes eslint@9 --no-config-lookup -c eslint.config.mjs .
+
   import-prod:
     name: Import solution into PROD
-    needs: export-solution
+    needs: scan-solution
     runs-on: ubuntu-24.04
     # Manual approval: configure Required reviewers on the 'prod' environment.
     environment: prod
